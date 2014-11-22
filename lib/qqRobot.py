@@ -8,8 +8,9 @@ import json
 import random
 import time
 import string
+import itertools
 import logging
-LOG_FORMAT='%(asctime)s %(filename)s[%(lineno)d] %(levelname)-8s> %(message)s'
+LOG_FORMAT='%(asctime)s %(filename)-10s[%(lineno)d] %(levelname)-8s> %(message)s'
 logging.basicConfig(level=logging.DEBUG,
     format=LOG_FORMAT,
     datefmt='%m-%d %H:%M:%S',
@@ -79,6 +80,7 @@ class QQ(object):
         status, _, url = self._loginStep1(verifyCode, encryptParams)
         self._loginStep2(url)
         self._loginStep3()
+        self.qqStatus = "online"
 
     def _checkIfNeedVerifyCode(self):
         ''' 检查是否需要验证码登录 '''
@@ -167,32 +169,137 @@ class QQ(object):
             ret += _a[d & 15]
         return ret
 
-    def getGroupList(self):
-        ''' 获取群信息 '''
+    def requireGroupList(self, func):
+        def wrapper():
+            if self.groupList == {}:
+                info = "请先获取群列表..."
+                logging.info(info)
+                return info
+            else:
+                return func()
+        return wrapper
+
+    def _getGroupList(self):
+        ''' 获取原始的群信息 '''
+        _groupList = {}
         url = 'http://s.web2.qq.com/api/get_group_name_list_mask2'
-#        return url
-        if isinstance(self.vfwebqq, unicode):
-            self.vfwebqq = self.vfwebqq.encode("utf8")
         data = {
             'r': json.dumps(
                 {
-                    'vfwebqq': self.vfwebqq,
+                    'vfwebqq': utils.toStr(self.vfwebqq),
                     'hash': self._genHashCode(),
                 }),
         }
         #不加referer会返回100101，没有hash会返回50
         r = self.session.post(url, data=data, headers=REFERER_HEADER)
         content = json.loads(r.content)
-        logging.info("group info: %s", r.content)
-        if content['retcode'] == 0:
-            result = content['result']
-            for i in result['gnamelist']:
-                self.groupList[i['code']] = i
+        #{"retcode":0,"result":{"gmasklist":[],"gnamelist":[{"flag":16778241,"name":"测试专用group-顺手牵羊","gid":2619045161,"code":3009117424},{"flag":16778241,"name":"测试专用group-无懈可击","gid":157462148,"code":3564680573}],"gmarklist":[]}} ]]]}
+        logging.info("获取原始的群信息为: %s", r.content)
+        if content["retcode"] == 0:
+            for ginfo in content["result"]["gnamelist"]:
+                # 要通过gcode来获取QQ号码
+                _groupList[ginfo["code"]] = ginfo
             logging.info("加载群信息成功...")
-            logging.info(self.groupList)
-            return self.groupList
+            return _groupList
         else:
-            logging.info("加载群信息失败! 错误码: %s", content['retcode'])
+            logging.error("加载群信息失败! 错误码: %s", content["retcode"])
+
+    def getGroupList(self):
+        ''' 获取群信息 '''
+        for gcode, ginfo in self._getGroupList().iteritems():
+            # ginfo: 如_getGroupList中所示
+            gname = ginfo["name"]
+            gid = self.getQQFromUin(gcode)
+            if gid:
+                logging.info("获取群组QQ号码成功: %d ..." % gid)
+            else:
+                logging.error("获取群组QQ号码失败")
+                return 1
+            self.groupList[gid] = ginfo
+        return self.groupList
+
+    def getQQFromUin(self, uin):
+        ''' 根据uin来获取QQ号码'''
+        url = "http://s.web2.qq.com/api/get_friend_uin2"
+        params = {
+            "tuin": uin,
+            "vfwebqq": self.vfwebqq,
+            "type": 1,
+            "t": time.time() * 1000,
+        }
+        url += "?" + "&".join("%s=%s" % i for i in params.iteritems())
+        r = self.session.get(url, headers=REFERER_HEADER)
+        # {"retcode":0,"result":{"uiuin":"","account":17036754,"uin":3564680573}}
+        content = json.loads(r.content)
+        if content["retcode"] == 0:
+            qqNumber = content["result"]["account"]
+            return qqNumber
+        else:
+            logging.error("获取QQ号码失败...")
+            return None
+
+    def _getGroupMembers(self, code):
+        ''' 获取群成员列表的原始数据 '''
+        url = 'http://s.web2.qq.com/api/get_group_info_ext2'
+        params = {
+            'gcode': code,
+            'vfwebqq': self.vfwebqq,
+            't': time.time() * 1000,
+        }
+        url = url + "?" + "&".join("%s=%s" % i for i in params.iteritems())
+        r = self.session.get(url, headers=REFERER_HEADER)
+        content = json.loads(r.content)
+        if content['retcode'] != 0:
+            logging.warning("获取群成员列表失败! Code: %s", content['retcode'])
+            return None
+        return content["result"]
+
+    def getGroupMembers(self, groupId):
+        ''' 获取群成员列表 '''
+        if self.groupList == {}:
+            info = "请先获取群列表..."
+            logging.info(info)
+            return info      
+        groupMembers = []
+        result = self._getGroupMembers(self.groupList[groupId]["code"])
+        # 自己的uin就是QQ号码,而其他成员的不是.
+        for minfo in result["minfo"]:
+            if self.qq == minfo["uin"]:
+                groupMembers.append({self.qq: minfo})
+                continue
+            groupMembers.append({self.getQQFromUin(minfo["uin"]): minfo})
+        logging.info("获取群成员数量: %d ..." % len(groupMembers))
+        return groupMembers
+
+
+    @staticmethod
+    def prepareMsgContent(msg):
+        ''' 消息内容的格式转换 '''
+        msg = [utils.toStr(msg).replace('"', '\\"'), ["font", MSG_FONT]]
+        return json.dumps(msg, ensure_ascii=False, encoding="utf8")
+
+    @staticmethod
+    def prepareMsgId(r=itertools.count(random.randint(10000, 50000))):
+        ''' 消息id '''
+        return r.next()
+
+    def sendGroupMsg(self, groupId, msg):
+        ''' 发送群消息 '''
+        url = "http://d.web2.qq.com/channel/send_qun_msg2"
+        data = {
+            "r": json.dumps({
+                    "group_uin": self.groupList[groupId]["gid"],
+                    "msg_id": self.prepareMsgId(),
+                    "content": self.prepareMsgContent(msg),
+                    "clientid": self.clientid,
+                    "psessionid": self.psessionid,
+                })
+        }
+        print url
+        print data
+        r = self.session.post(url, data=data, headers=REFERER_HEADER)
+        logging.info("发送群组消息: %s" % r.content)
+        return 0
 
 if __name__ == "__main__":
     logging.info("QQ 机器人开始启动...")
