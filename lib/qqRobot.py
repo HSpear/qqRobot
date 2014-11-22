@@ -53,6 +53,7 @@ class QQ(object):
     ''' Base class for QQ '''
     def __init__(self, qq, password):
         self.qq = qq
+        self.qqName = None
         self.password = password
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
@@ -60,8 +61,11 @@ class QQ(object):
         self.psessionid = None
         self.vfwebqq = None
         self.ptwebqq = None
+        self.qqStatus = "offline"
+        self.groupList = {}
 
-        self.grouplist = {}
+        logging.info("首先登录QQ: %s ..." % self.qq)
+        self.login()
 
     def login(self):
         ''' QQ login '''
@@ -166,6 +170,7 @@ class QQ(object):
     def getGroupList(self):
         ''' 获取群信息 '''
         url = 'http://s.web2.qq.com/api/get_group_name_list_mask2'
+#        return url
         if isinstance(self.vfwebqq, unicode):
             self.vfwebqq = self.vfwebqq.encode("utf8")
         data = {
@@ -182,14 +187,15 @@ class QQ(object):
         if content['retcode'] == 0:
             result = content['result']
             for i in result['gnamelist']:
-                self.grouplist[i['code']] = i
+                self.groupList[i['code']] = i
             logging.info("加载群信息成功...")
-            logging.info(self.grouplist)
+            logging.info(self.groupList)
+            return self.groupList
         else:
             logging.info("加载群信息失败! 错误码: %s", content['retcode'])
 
 if __name__ == "__main__":
     logging.info("QQ 机器人开始启动...")
-    qq = QQ(3067487368,"qqdianpingoa")
+    qq = QQ(3040493963, "password")
     qq.login()
     qq.getGroupList()
